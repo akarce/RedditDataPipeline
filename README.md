@@ -77,7 +77,7 @@ $ docker exec -it trino bash
 [trino@86b69b8cef42 /]$ trino --catalog hive
 trino> show schemas;
 
-** Loading Data into Hive**
+**Loading Data into Hive**
 
 `$ docker exec -it hiveserver2 bash`
 
@@ -95,4 +95,4 @@ b. Open Tableau Desktop and Connect to a Server > Other Databases (JDBC) and Sig
 
 c. Tableau Hive Connection via JDBC driver; Username: hive Password: password dialect : SQL92 url : jdbc:hive2://localhost:10000/default
 
-- Since Superset UI is web based, you need only to go “http://localhost:8088/” from your browser.
+- Since Superset UI is web based, you need only to go http://localhost:8088/ from your browser.

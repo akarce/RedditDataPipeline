@@ -1,0 +1,348 @@
+version: '3.3'
+
+x-airflow-common:
+  &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: apache/airflow:2.9.3
+  env_file:
+    - .env
+  volumes:
+    - ./config:/opt/airflow/config
+    - ./dags:/opt/airflow/dags
+    - ./data:/opt/airflow/data
+    - ./etls:/opt/airflow/etls
+    - ./pipelines:/opt/airflow/pipelines
+    - ./plugins:/opt/airflow/plugins
+    - ./utils:/opt/airflow/utils
+    - ./requirements.txt:/opt/airflow/requirements.txt
+    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+  user: "0:0"
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16.4
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: airflow_reddit
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    container_name: webserver
+    ports:
+      - "8082:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    container_name: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+      
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    container_name: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        function ver() {
+          printf "%04d%04d%04d%04d" $${1//./ }
+        }
+        if [[ -z "${AIRFLOW_UID}" ]]; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: AIRFLOW_UID not set!\e[0m"
+          echo "If you are on Linux, you SHOULD follow the instructions below to set "
+          echo "AIRFLOW_UID environment variable, otherwise files will be owned by root."
+          echo "For other operating systems you can get rid of the warning with manually created .env file:"
+          echo "    See: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#setting-the-right-airflow-user"
+          echo
+        fi
+        one_meg=1048576
+        mem_available=$$(($$(getconf _PHYS_PAGES) * $$(getconf PAGE_SIZE) / one_meg))
+        cpus_available=$$(grep -cE 'cpu[0-9]+' /proc/stat)
+        disk_available=$$(df / | tail -1 | awk '{print $$4}')
+        warning_resources="false"
+        if (( mem_available < 4000 )) ; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough memory available for Docker.\e[0m"
+          echo "At least 4GB of memory required. You have $$(numfmt --to iec $$((mem_available * one_meg)))"
+          echo
+          warning_resources="true"
+        fi
+        if (( cpus_available < 2 )); then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough CPUS available for Docker.\e[0m"
+          echo "At least 2 CPUs recommended. You have $${cpus_available}"
+          echo
+          warning_resources="true"
+        fi
+        if (( disk_available < one_meg * 10 )); then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough Disk space available for Docker.\e[0m"
+          echo "At least 10 GBs recommended. You have $$(numfmt --to iec $$((disk_available * 1024 )))"
+          echo
+          warning_resources="true"
+        fi
+        if [[ $${warning_resources} == "true" ]]; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: You have not enough resources to run Airflow (see above)!\e[0m"
+          echo "Please follow the instructions to increase amount of resources available:"
+          echo "   https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#before-you-begin"
+          echo
+        fi
+        mkdir -p /sources/logs /sources/dags /sources/plugins
+        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
+    user: "0:0"
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}:/sources
+
+
+  minio:
+    image: minio/minio:RELEASE.2024-08-29T01-40-52Z
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_CONFIG_ENV_FILE=/etc/config.env
+    volumes:
+      - ./minio_data:/mnt/data
+      - ./config/minio_config.env:/etc/config.env
+    entrypoint: ["minio", "server", "/mnt/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  postgres2:
+    image: postgres:16.4
+    container_name: postgres2
+    environment:
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: metastore_db
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "hive", "-d", "metastore_db"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+      timeout: 5s
+    restart: always   
+
+  metastore:
+    image: apache/hive:4.0.0
+    container_name: metastore-standalone
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      JAVA_TOOL_OPTIONS: "-Xmx2g"
+    env_file:
+      - config/hive-config.env
+    ports:
+      - "9083:9083"
+    command: >
+      /bin/bash -c "
+      RETRIES=5;
+      until [ $RETRIES -eq 0 ] || /opt/hive/bin/schematool -dbType postgres -initOrUpgradeSchema; do
+        echo 'Retrying schema initialization...';
+        RETRIES=$((RETRIES-1));
+        sleep 5;
+      done;
+    
+      if [ $RETRIES -eq 0 ]; then
+        echo 'Failed to initialize schema after multiple attempts';
+        exit 1;
+      fi
+    
+      /opt/hive/bin/hive --skiphadoopversion --skiphbasecp --service metastore
+      "
+    volumes:
+      - hive_warehouse:/opt/hive/data/warehouse
+      - ./hive-libs/postgresql-42.5.5.jar:/opt/hive/lib/postgresql-42.5.5.jar
+      - ./hive-libs/hadoop-aws-3.3.6.jar:/opt/hive/lib/hadoop-aws-3.3.6.jar
+      - ./hive-libs/aws-java-sdk-bundle-1.12.367.jar:/opt/hive/lib/aws-java-sdk-bundle-1.12.367.jar
+      - ./hive/hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./hive/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+    depends_on:
+      postgres2:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+
+  hiveserver2:
+    image: apache/hive:4.0.0
+    container_name: hiveserver2
+    environment:
+      SERVICE_NAME: hiveserver2
+      DB_DRIVER: postgres
+      JAVA_TOOL_OPTIONS: "-Xmx2g"
+      HIVE_METASTORE_URIS: thrift://metastore-standalone:9083
+      SERVICE_OPTS: >
+        -Dive.metastore.schema.verification.record.version=false
+        -Dhive.metastore.schema.initialization=false
+    env_file:
+      - config/hive-config.env
+    ports:
+      - "10000:10000"
+      - "10002:10002"
+    volumes:
+      - hive_warehouse:/opt/hive/data/warehouse
+      - ./hive-libs/postgresql-42.5.5.jar:/opt/hive/lib/postgresql-42.5.5.jar
+      - ./hive-libs/hadoop-aws-3.3.6.jar:/opt/hive/lib/hadoop-aws-3.3.6.jar
+      - ./hive-libs/aws-java-sdk-bundle-1.12.367.jar:/opt/hive/lib/aws-java-sdk-bundle-1.12.367.jar
+      - ./hive/hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./hive/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./hive/start-hiveserver2.sh:/opt/hive/start-hiveserver2.sh
+    command: ["bash", "/opt/hive/start-hiveserver2.sh"]
+    restart: always
+    depends_on:
+      - metastore
+  
+  nifi:
+    build:
+      context: .
+      dockerfile: Dockerfile.nifi
+    container_name: nifi
+    ports:
+      - "9443:9443"
+    environment:
+      NIFI_WEB_HTTPS_PORT: '9443'
+    volumes:
+      - ./config/nifi-credentials.properties:/opt/nifi/nifi-current/conf/credentials.properties
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "https://localhost:9443/nifi"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      - hiveserver2
+
+  trino:
+    image: trinodb/trino:454
+    container_name: trino
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino-config:/etc/trino
+      - ./trino-data:/var/trino/data
+    depends_on:
+      - hiveserver2
+      - metastore
+
+  superset:
+    build:
+      context: .
+      dockerfile: Dockerfile.superset  # Use the custom Dockerfile
+    container_name: superset
+    ports:
+      - 8088:8088
+    environment:
+      SUPERSET_ENV: development
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      PYTHONPATH: /app/pythonpath
+    volumes:
+      - ./superset_config:/app/pythonpath
+      - ./superset/setup_connections.sh:/app/scripts/setup_connections.sh
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        superset db upgrade && \
+        superset fab create-admin --username admin --firstname Admin --lastname User --email admin@superset.com --password admin || echo "Admin user already exists" && \
+        superset init && \
+        /app/scripts/setup_connections.sh && \
+        gunicorn --bind 0.0.0.0:8088 "superset.app:create_app()"
+
+  db:
+    image: postgres:16.4
+    environment:
+      POSTGRES_DB: superset
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: superset
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superset"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:latest
+    container_name: redis
+    ports:
+      - 6379:6379
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  hive_warehouse:
+  postgres-db-volume:
+  db_data:
+  redis_data:

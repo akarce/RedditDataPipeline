@@ -1,0 +1,11 @@
+# Use the official NiFi image as a base
+FROM apache/nifi:2.0.0-M4
+
+# Copy custom libraries into the NiFi lib directory
+COPY ./nifi/* /opt/nifi/nifi-current/lib/
+
+# Adjust permissions only for the newly copied files
+RUN find /opt/nifi/nifi-current/lib/ -type f -name 'custom_lib*' -exec chmod 755 {} \;
+
+# Expose the ports required by NiFi
+EXPOSE 8080

@@ -1,0 +1,10 @@
+# Dockerfile.superset
+FROM apache/superset:548d543
+
+# Install psycopg2 for Postgres connection
+USER root
+RUN pip install psycopg2-binary flask_cors pyhive thrift thrift_sasl sqlalchemy
+
+
+# Switch back to the default user
+USER superset
